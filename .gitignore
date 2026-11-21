@@ -1,0 +1,19 @@
+# Build output and IDE settings
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+# Local credentials, overrides and runtime captures
+.env
+.env.*
+!.env.example
+appsettings.local.json
+settings.local.json
+*.wav
+*.mp3
+*.flac
+*.transcript.txt
+# Speech models are large, separately downloaded assets
+models/
+**/models/
