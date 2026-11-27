@@ -29,6 +29,8 @@ internal sealed class AppSettings
     public string? ScreenCloudModel { get; set; }
     public string? ScreenEndpoint { get; set; }
     public string? ScreenPrompt { get; set; }
+    public string ScreenProcessingMode { get; set; } = "OCR only";
+    public string ScreenVisionFallbackModel { get; set; } = "gemma3:4b";
     public int ScreenMaxTokens { get; set; } = 80;
     public int ScreenImageSize { get; set; } = 1024;
 
