@@ -40,8 +40,7 @@ internal sealed class ScreenAssistantForm : Form
     private bool _busy;
     private byte[]? _previous;
     private byte[]? _candidate;
-    private int _stable;
-    private int _pendingFrames;
+    private readonly NumericUpDown _pixelThreshold = new() { Minimum = 0.5m, Maximum = 25m, DecimalPlaces = 1, Increment = 0.5m, Value = 2m, Width = 65 };
     private readonly Form _main;
     private readonly Form _overlay;
     private string _cloudModel;
@@ -66,6 +65,7 @@ internal sealed class ScreenAssistantForm : Form
         _prompt.Text = settings?.ScreenPrompt ?? _prompt.Text;
         _maxTokens.Value = Math.Clamp(settings?.ScreenMaxTokens ?? 80, 16, 1024);
         _imageSize.Value = Math.Clamp(settings?.ScreenImageSize ?? 1024, 512, 4096);
+        _pixelThreshold.Value = Math.Clamp(settings?.ScreenPixelChangePercent ?? 2m, 0.5m, 25m);
         Text = "Screen assistant — stopped";
         Size = new Size(780, 650); MinimumSize = new Size(650, 500); TopMost = true;
         foreach (var screen in Screen.AllScreens) _monitor.Items.Add(screen.DeviceName);
@@ -74,7 +74,7 @@ internal sealed class ScreenAssistantForm : Form
             int saved = settings?.ScreenMonitor is string monitor ? _monitor.Items.IndexOf(monitor) : -1;
             _monitor.SelectedIndex = saved >= 0 ? saved : 0;
         }
-        var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 175, AutoScroll = true };
+        var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 200, AutoScroll = true };
         top.Controls.AddRange([new Label { Text = "Monitor", AutoSize = true }, _monitor,
             _cloud, new Label { Text = "Processing", AutoSize = true }, _processing,
             new Label { Text = "AI model", AutoSize = true }, _model,
@@ -82,7 +82,8 @@ internal sealed class ScreenAssistantForm : Form
             new Label { Text = "Local / remote endpoint", AutoSize = true }, _endpoint,
             _start, _stop, _once, _status,
             new Label { Text = "Max tokens", AutoSize = true }, _maxTokens,
-            new Label { Text = "Max image edge (px)", AutoSize = true }, _imageSize]);
+            new Label { Text = "Max image edge (px)", AutoSize = true }, _imageSize,
+            new Label { Text = "Pixel change (%)", AutoSize = true }, _pixelThreshold]);
         var split = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
         split.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
         split.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
@@ -107,7 +108,12 @@ internal sealed class ScreenAssistantForm : Form
             else { _cloudModel = _model.Text; _model.Text = _localModel; }
             _endpoint.Enabled = !_cloud.Checked;
         };
-        _processing.SelectedIndexChanged += (_, _) => _visionFallback.Enabled = _processing.SelectedIndex == 1 && _session == null;
+        _pixelThreshold.Enabled = _processing.SelectedIndex != 0;
+        _processing.SelectedIndexChanged += (_, _) =>
+        {
+            _visionFallback.Enabled = _processing.SelectedIndex == 1 && _session == null;
+            _pixelThreshold.Enabled = _processing.SelectedIndex != 0 && _session == null;
+        };
         var save = new Button { Text = "Save settings", AutoSize = true };
         top.Controls.Add(save);
         save.Click += (_, _) => { if (SaveSettings()) _status.Text = "Settings saved"; };
@@ -152,6 +158,7 @@ internal sealed class ScreenAssistantForm : Form
         _settings.ScreenPrompt = _prompt.Text;
         _settings.ScreenMaxTokens = (int)_maxTokens.Value;
         _settings.ScreenImageSize = (int)_imageSize.Value;
+        _settings.ScreenPixelChangePercent = _pixelThreshold.Value;
         _settings.ScreenProcessingMode = _processing.SelectedItem as string ?? "OCR only";
         _settings.ScreenVisionFallbackModel = _visionFallback.Text.Trim();
         try { _settings.Save(); return true; }
@@ -174,13 +181,13 @@ internal sealed class ScreenAssistantForm : Form
             ". Close sensitive content and use only where authorized. Continue?", "Screen capture consent",
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return false;
         SaveSettings();
-        _session = new(); _previous = null; _candidate = null; _stable = 0; _pendingFrames = 0;
+        _session = new(); _previous = null; _candidate = null;
         _lastOcrText = null; _pendingOcrText = null;
         _lastOcrFrameHash = null; _cachedOcrText = "";
         _checkedVisionModels.Clear();
         _start.Enabled = _once.Enabled = _monitor.Enabled = _cloud.Enabled = _model.Enabled = _endpoint.Enabled = _prompt.Enabled = false;
         _maxTokens.Enabled = _imageSize.Enabled = false;
-        _processing.Enabled = _visionFallback.Enabled = false;
+        _processing.Enabled = _visionFallback.Enabled = _pixelThreshold.Enabled = false;
         Log($"Session started: {(_cloud.Checked ? "cloud" : "local/remote")}, mode {_processing.SelectedItem}, model {_model.Text}, {_maxTokens.Value} max tokens.");
         _stop.Enabled = true; _status.Text = "Monitoring"; Text = "Screen assistant — monitoring";
         return true;
@@ -196,6 +203,7 @@ internal sealed class ScreenAssistantForm : Form
         _endpoint.Enabled = !_cloud.Checked; _stop.Enabled = false;
         _maxTokens.Enabled = _imageSize.Enabled = true;
         _processing.Enabled = true; _visionFallback.Enabled = _processing.SelectedIndex == 1;
+        _pixelThreshold.Enabled = _processing.SelectedIndex != 0;
         _requestClock = null;
         if (session != null) Log("Session stopped; outstanding request cancelled.");
         _status.Text = "Stopped"; Text = "Screen assistant — stopped";
@@ -216,7 +224,8 @@ internal sealed class ScreenAssistantForm : Form
             using var frame = new Bitmap(bounds.Width, bounds.Height);
             using (var g = Graphics.FromImage(frame))
             {
-                g.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
+                // SRCCOPY captures the desktop without explicitly drawing the mouse cursor.
+                g.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size, CopyPixelOperation.SourceCopy);
                 foreach (var form in new[] { this, _main, _overlay })
                 {
                     if (!form.Visible || form.WindowState == FormWindowState.Minimized) continue;
@@ -226,34 +235,14 @@ internal sealed class ScreenAssistantForm : Form
                     g.FillRectangle(Brushes.Black, rect);
                 }
             }
-            using var tiny = new Bitmap(frame, 96, 54);
-            var signature = new byte[96 * 54];
-            for (int y = 0; y < 54; y++)
-                for (int x = 0; x < 96; x++)
-                {
-                    var c = tiny.GetPixel(x, y);
-                    signature[y * 96 + x] = (byte)((c.R + c.G + c.B) / 3);
-                }
-            // Pixel differences trigger inference only in explicit Vision only mode.
-            // OCR modes use the text itself, not the screenshot signature.
-            if (!force && _processing.SelectedIndex == 2)
-            {
-                if (_previous != null && Difference(_previous, signature) < 0.35)
-                {
-                    _pendingFrames = 0; _candidate = null; _stable = 0;
-                    _status.Text = "Monitoring — waiting for changes";
-                    return;
-                }
-                _pendingFrames++;
-                if (_candidate != null && Difference(_candidate, signature) < 0.7) _stable++;
-                else { _candidate = signature; _stable = 0; }
-                if (_stable < 1 && _pendingFrames < 3)
-                {
-                    _status.Text = "Change detected — waiting briefly";
-                    return;
-                }
-            }
+            // Measure the fraction of sampled pixels that changed visibly, not the
+            // average brightness delta (which can overreact to small cursor/hover changes).
+            byte[] signature = PixelSignature(frame);
+            double pixelChange = _previous == null ? 100 : ChangedPercent(_previous, signature);
+            double threshold = (double)_pixelThreshold.Value;
             int mode = _processing.SelectedIndex;
+            if (!force && mode == 2 && !ConfirmPixelChange(signature, pixelChange, threshold))
+                return;
             if (mode == 2 || force)
                 Log($"Frame selected: {bounds.Width}x{bounds.Height}; capture and comparison {captureClock.ElapsedMilliseconds} ms.");
             bool useImage = mode == 2;
@@ -293,37 +282,45 @@ internal sealed class ScreenAssistantForm : Form
                     recognized.Normalize(NormalizationForm.FormKC), @"\s+", " ").Trim();
                 bool hasText = normalized.Any(char.IsLetterOrDigit);
 
+                bool textChanged = hasText && !string.Equals(normalized, _lastOcrText, StringComparison.Ordinal);
                 if (!force)
                 {
-                    if (!hasText || string.Equals(normalized, _lastOcrText, StringComparison.Ordinal))
+                    if (textChanged)
+                    {
+                        // Confirm the same normalized text twice. Small text edits can
+                        // trigger even if fewer than the configured percent of pixels change.
+                        _candidate = null;
+                        if (!string.Equals(normalized, _pendingOcrText, StringComparison.Ordinal))
+                        {
+                            _pendingOcrText = normalized;
+                            _status.Text = "Monitoring — verifying changed text";
+                            return;
+                        }
+                        Log("Confirmed text change — preparing AI request.");
+                    }
+                    else
                     {
                         _pendingOcrText = null;
-                        _status.Text = hasText ? "Monitoring — text unchanged" : "Monitoring — no readable text";
-                        return;
-                    }
-
-                    // Require the same changed text on two successive observations.
-                    // Ignore transient OCR noise, hover text and caret-induced variations.
-                    if (!string.Equals(normalized, _pendingOcrText, StringComparison.Ordinal))
-                    {
-                        _pendingOcrText = normalized;
-                        _status.Text = "Monitoring — verifying changed text";
-                        return;
+                        if (mode != 1)
+                        {
+                            _status.Text = hasText ? "Monitoring — text unchanged" : "Monitoring — no readable text";
+                            return;
+                        }
+                        if (!ConfirmPixelChange(signature, pixelChange, threshold)) return;
+                        useImage = true;
+                        selectedModel = _visionFallback.Text.Trim();
+                        Log($"Confirmed visual change ({pixelChange:F1}%); using vision fallback.");
                     }
                 }
                 _pendingOcrText = null;
                 Log($"OCR: {normalized.Length} characters; check {ocrClock.Elapsed.TotalSeconds:F2}s.");
-                if (!force) Log("Confirmed text change — preparing AI request.");
-
-                // Hybrid may use vision for sparse text, but automatic requests still
-                // require a confirmed nonempty text change. Manual analysis can use images.
                 if (mode == 1 && normalized.Count(char.IsLetterOrDigit) < 20)
                 {
                     useImage = true;
                     selectedModel = _visionFallback.Text.Trim();
                     Log("Sparse OCR text; using the configured vision fallback.");
                 }
-                else if (!hasText)
+                else if (!hasText && !useImage)
                 {
                     _status.Text = "No readable text detected";
                     Log(_status.Text);
@@ -422,7 +419,7 @@ internal sealed class ScreenAssistantForm : Form
             Log($"Stream ended after {_requestClock?.Elapsed.TotalSeconds:F2}s; completion marker: {completed}.");
             if (mode != 2) _lastOcrText = normalized;
             _previous = signature;
-            _candidate = null; _stable = 0; _pendingFrames = 0;
+            _candidate = null;
             if (!_closed) _status.Text = "Monitoring — response complete";
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { Log("Request cancelled."); }
@@ -431,10 +428,50 @@ internal sealed class ScreenAssistantForm : Form
         finally { _requestClock = null; _busy = false; if (!_closed && _session == null) _start.Enabled = _once.Enabled = true; }
     }
 
-    private static double Difference(byte[] a, byte[] b)
+    private bool ConfirmPixelChange(byte[] signature, double percent, double threshold)
     {
-        long sum = 0;
-        for (int i = 0; i < a.Length; i++) sum += Math.Abs(a[i] - b[i]);
-        return sum / (double)a.Length;
+        if (percent < threshold)
+        {
+            _candidate = null;
+            _status.Text = $"Monitoring — minor visual change ({percent:F1}%)";
+            return false;
+        }
+        // Require two similar frames; avoid requests for transient animations.
+        if (_candidate == null || ChangedPercent(_candidate, signature) > Math.Max(0.25, threshold / 4))
+        {
+            _candidate = signature;
+            _status.Text = $"Monitoring — verifying visual change ({percent:F1}%)";
+            return false;
+        }
+        _candidate = null;
+        Log($"Confirmed pixel change: {percent:F1}% (threshold {threshold:F1}%).");
+        return true;
+    }
+
+    private static byte[] PixelSignature(Bitmap frame)
+    {
+        const int width = 192, height = 108;
+        using var tiny = new Bitmap(frame, width, height);
+        var rgb = new byte[width * height * 3];
+        int i = 0;
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            {
+                Color c = tiny.GetPixel(x, y);
+                rgb[i++] = c.R; rgb[i++] = c.G; rgb[i++] = c.B;
+            }
+        return rgb;
+    }
+
+    private static double ChangedPercent(byte[] a, byte[] b)
+    {
+        const int channelTolerance = 24;
+        int changed = 0;
+        for (int i = 0; i < a.Length; i += 3)
+            if (Math.Abs(a[i] - b[i]) >= channelTolerance ||
+                Math.Abs(a[i + 1] - b[i + 1]) >= channelTolerance ||
+                Math.Abs(a[i + 2] - b[i + 2]) >= channelTolerance)
+                changed++;
+        return 100.0 * changed / (a.Length / 3);
     }
 }
