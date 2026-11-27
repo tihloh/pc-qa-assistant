@@ -29,6 +29,8 @@ internal sealed class AppSettings
     public string? ScreenCloudModel { get; set; }
     public string? ScreenEndpoint { get; set; }
     public string? ScreenPrompt { get; set; }
+    public int ScreenMaxTokens { get; set; } = 80;
+    public int ScreenImageSize { get; set; } = 1024;
 
     private static string SettingsFile => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
