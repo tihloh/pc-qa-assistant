@@ -21,11 +21,22 @@ internal sealed record CaptureOptions(
     bool SaveRecording,
     bool SaveTranscript);
 
-internal sealed record CaptureCompletedEventArgs(
+internal sealed class CaptureCompletedEventArgs(
     string? FilePath,
     string? TranscriptFilePath,
     long CapturedBytes,
     long DroppedTranscriptChunks,
-    Exception? Error) : EventArgs;
+    Exception? Error) : EventArgs
+{
+    public string? FilePath { get; } = FilePath;
+    public string? TranscriptFilePath { get; } = TranscriptFilePath;
+    public long CapturedBytes { get; } = CapturedBytes;
+    public long DroppedTranscriptChunks { get; } = DroppedTranscriptChunks;
+    public Exception? Error { get; } = Error;
+}
 
-internal sealed record TranscriptEventArgs(string Text, bool IsFinal) : EventArgs;
+internal sealed class TranscriptEventArgs(string Text, bool IsFinal) : EventArgs
+{
+    public string Text { get; } = Text;
+    public bool IsFinal { get; } = IsFinal;
+}
