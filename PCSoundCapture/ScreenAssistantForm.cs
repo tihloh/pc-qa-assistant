@@ -16,6 +16,9 @@ internal sealed class ScreenAssistantForm : Form
     private readonly TextBox _model = new() { Width = 170 };
     private readonly TextBox _visionFallback = new() { Width = 170 };
     private string? _lastOcrText;
+    private string? _pendingOcrText;
+    private byte[]? _lastOcrFrameHash;
+    private string _cachedOcrText = "";
     private readonly HashSet<string> _checkedVisionModels = new(StringComparer.OrdinalIgnoreCase);
     private readonly TextBox _endpoint = new() { Width = 220, Text = "http://127.0.0.1:11434" };
     private readonly CheckBox _cloud = new() { Text = "Cloud (sends screen data)", AutoSize = true };
@@ -172,7 +175,9 @@ internal sealed class ScreenAssistantForm : Form
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return false;
         SaveSettings();
         _session = new(); _previous = null; _candidate = null; _stable = 0; _pendingFrames = 0;
-        _lastOcrText = null; _checkedVisionModels.Clear();
+        _lastOcrText = null; _pendingOcrText = null;
+        _lastOcrFrameHash = null; _cachedOcrText = "";
+        _checkedVisionModels.Clear();
         _start.Enabled = _once.Enabled = _monitor.Enabled = _cloud.Enabled = _model.Enabled = _endpoint.Enabled = _prompt.Enabled = false;
         _maxTokens.Enabled = _imageSize.Enabled = false;
         _processing.Enabled = _visionFallback.Enabled = false;
@@ -229,9 +234,11 @@ internal sealed class ScreenAssistantForm : Form
                     var c = tiny.GetPixel(x, y);
                     signature[y * 96 + x] = (byte)((c.R + c.G + c.B) / 3);
                 }
-            if (!force)
+            // Pixel differences trigger inference only in explicit Vision only mode.
+            // OCR modes use the text itself, not the screenshot signature.
+            if (!force && _processing.SelectedIndex == 2)
             {
-                if (_previous != null && Difference(_previous, signature) < (_processing.SelectedIndex == 2 ? 0.35 : 0.03))
+                if (_previous != null && Difference(_previous, signature) < 0.35)
                 {
                     _pendingFrames = 0; _candidate = null; _stable = 0;
                     _status.Text = "Monitoring — waiting for changes";
@@ -246,8 +253,9 @@ internal sealed class ScreenAssistantForm : Form
                     return;
                 }
             }
-            Log($"Frame selected: {bounds.Width}x{bounds.Height}; capture and comparison {captureClock.ElapsedMilliseconds} ms.");
             int mode = _processing.SelectedIndex;
+            if (mode == 2 || force)
+                Log($"Frame selected: {bounds.Width}x{bounds.Height}; capture and comparison {captureClock.ElapsedMilliseconds} ms.");
             bool useImage = mode == 2;
             string recognized = "";
             string normalized = "";
@@ -263,29 +271,63 @@ internal sealed class ScreenAssistantForm : Form
                     await ScreenOcr.EnsureDataAsync(setupTimeout.Token);
                 }
                 token.ThrowIfCancellationRequested();
-                Phase("Extracting text locally");
+                // Hash the original masked PNG only to avoid repeating OCR on identical frames.
+                // A different image never by itself authorizes a model request.
                 var ocrClock = Stopwatch.StartNew();
                 using var ocrData = new MemoryStream();
-                // OCR uses the original screen resolution, independent of the vision image cap.
                 frame.Save(ocrData, ImageFormat.Png);
-                recognized = await ScreenOcr.ReadAsync(ocrData.ToArray(), token);
-                token.ThrowIfCancellationRequested();
-                normalized = System.Text.RegularExpressions.Regex.Replace(recognized, @"\s+", " ").Trim();
-                Log($"OCR: {normalized.Length} characters in {ocrClock.Elapsed.TotalSeconds:F2}s.");
+                byte[] png = ocrData.ToArray();
+                byte[] hash = System.Security.Cryptography.SHA256.HashData(png);
+                if (_lastOcrFrameHash != null && hash.AsSpan().SequenceEqual(_lastOcrFrameHash))
+                    recognized = _cachedOcrText;
+                else
+                {
+                    _phase = "Checking screen text";
+                    _status.Text = _phase;
+                    recognized = await ScreenOcr.ReadAsync(png, token);
+                    token.ThrowIfCancellationRequested();
+                    _lastOcrFrameHash = hash;
+                    _cachedOcrText = recognized;
+                }
+                normalized = System.Text.RegularExpressions.Regex.Replace(
+                    recognized.Normalize(NormalizationForm.FormKC), @"\s+", " ").Trim();
                 bool hasText = normalized.Any(char.IsLetterOrDigit);
-                // Hybrid falls back only for sparse or absent text; diagrams with substantial text need Vision only.
+
+                if (!force)
+                {
+                    if (!hasText || string.Equals(normalized, _lastOcrText, StringComparison.Ordinal))
+                    {
+                        _pendingOcrText = null;
+                        _status.Text = hasText ? "Monitoring — text unchanged" : "Monitoring — no readable text";
+                        return;
+                    }
+
+                    // Require the same changed text on two successive observations.
+                    // Ignore transient OCR noise, hover text and caret-induced variations.
+                    if (!string.Equals(normalized, _pendingOcrText, StringComparison.Ordinal))
+                    {
+                        _pendingOcrText = normalized;
+                        _status.Text = "Monitoring — verifying changed text";
+                        return;
+                    }
+                }
+                _pendingOcrText = null;
+                Log($"OCR: {normalized.Length} characters; check {ocrClock.Elapsed.TotalSeconds:F2}s.");
+                if (!force) Log("Confirmed text change — preparing AI request.");
+
+                // Hybrid may use vision for sparse text, but automatic requests still
+                // require a confirmed nonempty text change. Manual analysis can use images.
                 if (mode == 1 && normalized.Count(char.IsLetterOrDigit) < 20)
                 {
                     useImage = true;
                     selectedModel = _visionFallback.Text.Trim();
                     Log("Sparse OCR text; using the configured vision fallback.");
                 }
-                else if (!hasText || (!force && normalized == _lastOcrText))
+                else if (!hasText)
                 {
-                    _previous = signature; _candidate = null; _stable = 0; _pendingFrames = 0;
-                    _status.Text = hasText ? "Monitoring — same text skipped" : "No readable text detected";
+                    _status.Text = "No readable text detected";
                     Log(_status.Text);
-                    if (!hasText && force) _result.Text = "No readable text detected. Move this window away from the content or use Vision only.";
+                    if (force) _result.Text = "No readable text detected. Move this window away from the content or use Vision only.";
                     return;
                 }
             }
@@ -378,7 +420,7 @@ internal sealed class ScreenAssistantForm : Form
             token.ThrowIfCancellationRequested();
             if (output.Length == 0) throw new InvalidOperationException("Ollama returned no answer text. Check the selected model.");
             Log($"Stream ended after {_requestClock?.Elapsed.TotalSeconds:F2}s; completion marker: {completed}.");
-            if (!useImage) _lastOcrText = normalized;
+            if (mode != 2) _lastOcrText = normalized;
             _previous = signature;
             _candidate = null; _stable = 0; _pendingFrames = 0;
             if (!_closed) _status.Text = "Monitoring — response complete";
