@@ -12,6 +12,16 @@ internal sealed class MainForm : Form
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly OllamaClient _ai = new();
     private readonly AnswerOverlayForm _overlay = new();
+    private ScreenAssistantForm? _screenAssistant;
+    private void ShowScreenAssistant()
+    {
+        if (_screenAssistant == null || _screenAssistant.IsDisposed)
+            _screenAssistant = new ScreenAssistantForm(this, _overlay, _aiServer.Text,
+                _currentAiProvider == "Local" ? _aiModel.Text : _settings.AiModel,
+                _currentAiProvider == "Cloud" ? _aiModel.Text : _settings.CloudModel);
+        _screenAssistant.Show();
+        _screenAssistant.Activate();
+    }
     private readonly ComboBox _source = Combo();
     private readonly ComboBox _output = Combo();
     private readonly ComboBox _application = Combo();
@@ -222,7 +232,9 @@ internal sealed class MainForm : Form
         answers.Controls.Add(_lastQuestion, 0, 1);
         answers.Controls.Add(_answer, 0, 2);
         var bottom = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-        bottom.Controls.AddRange([_showOverlay, _copy]);
+        var screenAssistant = Button("Screen assistant");
+        screenAssistant.Click += (_, _) => ShowScreenAssistant();
+        bottom.Controls.AddRange([_showOverlay, _copy, screenAssistant]);
         answers.Controls.Add(bottom, 0, 3);
         answerGroup.Controls.Add(answers);
         root.Controls.Add(answerGroup, 0, 5);
@@ -233,6 +245,7 @@ internal sealed class MainForm : Form
         menu.Items.Add(_trayListen);
         menu.Items.Add(_trayStop);
         menu.Items.Add("Show answer window", null, (_, _) => ShowOverlay());
+        menu.Items.Add("Screen assistant", null, (_, _) => ShowScreenAssistant());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitApplication());
         _tray = new NotifyIcon
@@ -854,6 +867,7 @@ internal sealed class MainForm : Form
         StoreSettings();
         _disposed = true;
         _lifetime.Cancel();
+        _screenAssistant?.Close();
         _speechDebounce.Stop();
         _speechDebounce.Dispose();
         _clock.Stop();
