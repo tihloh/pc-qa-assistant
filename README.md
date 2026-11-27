@@ -74,9 +74,21 @@ The script publishes under `PCSoundCapture/bin/Release/net10.0-windows/win-x64/p
 
 No local Ollama language model is required when using Ollama Cloud. The Vosk model is downloaded separately because speech-to-text runs locally.
 
+## Screen assistant (vision)
+
+Open **Screen assistant** from the main window or tray menu. Select a monitor, enter a vision-capable Ollama model available on your endpoint, and optionally edit the analysis prompt. Local inference is the default; enable Cloud explicitly to use the saved API key.
+
+Choose **Analyze once** or **Start monitoring**. Confirm the destination and capture consent. Monitoring samples every 1.5 seconds and waits for a stable, changed frame; only one inference runs at a time. Results stream into an always-on-top window. Stop or close the screen assistant to cancel monitoring. Screenshots are held in memory only; the app masks its own main and answer windows and the screen assistant window before sending images. Keep these windows away from content you want analyzed.
+
+This initial implementation uses GDI screen capture and a vision model, not OCR. It supports individual monitors, not individual windows or selected regions. Audio and screen input can run independently; their results and context are not yet merged. Choose a vision model explicitly; an existing text-only audio model may not accept images. Small changes may be missed by the approximate change detector.
+
+Screenshots can contain confidential information. Cloud and remote endpoints receive the captured images, so use only authorized content and trusted endpoints. Local inference is recommended for sensitive documents. Do not use monitoring where assistance or capture is prohibited.
+
+Windows build and runtime verification of screen capture and streaming are pending.
+
 ## Privacy and security
 
-The app does not upload raw audio to Ollama Cloud. It sends recognized question text, and only includes recent recognized context if you enable that option. Request appropriate consent before listening to or processing meeting conversations. Do not commit secrets, recorded audio, transcripts, or local model files.
+The audio feature does not upload raw audio to Ollama Cloud. The separate opt-in screen feature sends screenshot images to the selected Ollama endpoint. It sends recognized question text, and only includes recent recognized context if you enable that option. Request appropriate consent before listening to or processing meeting conversations. Do not commit secrets, recorded audio, transcripts, or local model files.
 
 ## Development and verification
 
