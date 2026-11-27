@@ -18,7 +18,7 @@ internal sealed class MainForm : Form
         if (_screenAssistant == null || _screenAssistant.IsDisposed)
             _screenAssistant = new ScreenAssistantForm(this, _overlay, _aiServer.Text,
                 _currentAiProvider == "Local" ? _aiModel.Text : _settings.AiModel,
-                _currentAiProvider == "Cloud" ? _aiModel.Text : _settings.CloudModel);
+                _currentAiProvider == "Cloud" ? _aiModel.Text : _settings.CloudModel, _settings);
         _screenAssistant.Show();
         _screenAssistant.Activate();
     }
