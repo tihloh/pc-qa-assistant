@@ -28,6 +28,7 @@ internal sealed class ScreenAssistantForm : Form
     private readonly NumericUpDown _maxTokens = new() { Minimum = 16, Maximum = 1024, Value = 80, Width = 65 };
     private readonly NumericUpDown _imageSize = new() { Minimum = 512, Maximum = 4096, Increment = 128, Value = 1024, Width = 75 };
     private readonly TextBox _result = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+    private readonly TextBox _ocrPreview = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false };
     private readonly TextBox _activity = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 9) };
     private readonly System.Windows.Forms.Timer _activityTimer = new() { Interval = 1000 };
     private Stopwatch? _requestClock;
@@ -90,7 +91,14 @@ internal sealed class ScreenAssistantForm : Form
         split.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
         split.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
         var answerGroup = new GroupBox { Text = "AI response", Dock = DockStyle.Fill };
-        answerGroup.Controls.Add(_result);
+        var tabs = new TabControl { Dock = DockStyle.Fill };
+        var responseTab = new TabPage("Answer");
+        responseTab.Controls.Add(_result);
+        var recognizedTab = new TabPage("Recognized text (local)");
+        recognizedTab.Controls.Add(_ocrPreview);
+        tabs.TabPages.Add(responseTab);
+        tabs.TabPages.Add(recognizedTab);
+        answerGroup.Controls.Add(tabs);
         var logGroup = new GroupBox { Text = "Live activity (not saved)", Dock = DockStyle.Fill };
         var clearLog = new Button { Text = "Clear log", Dock = DockStyle.Bottom, Height = 28 };
         clearLog.Click += (_, _) => _activity.Clear();
@@ -185,7 +193,7 @@ internal sealed class ScreenAssistantForm : Form
         SaveSettings();
         _session = new(); _previous = null; _candidate = null;
         _lastOcrText = null; _pendingOcrText = null; _textChangeObservations = 0; _lastSentOcrText = null;
-        _lastOcrFrameHash = null; _cachedOcrText = "";
+        _lastOcrFrameHash = null; _cachedOcrText = ""; _ocrPreview.Clear();
         _checkedVisionModels.Clear();
         _start.Enabled = _once.Enabled = _monitor.Enabled = _cloud.Enabled = _model.Enabled = _endpoint.Enabled = _prompt.Enabled = false;
         _maxTokens.Enabled = _imageSize.Enabled = false;
@@ -278,6 +286,7 @@ internal sealed class ScreenAssistantForm : Form
                     _lastOcrFrameHash = hash;
                     _cachedOcrText = recognized;
                 }
+                if (_ocrPreview.Text != recognized) _ocrPreview.Text = recognized;
                 normalized = System.Text.RegularExpressions.Regex.Replace(
                     recognized.Normalize(NormalizationForm.FormKC), @"\s+", " ").Trim();
                 bool hasText = normalized.Any(char.IsLetterOrDigit);
