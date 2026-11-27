@@ -82,9 +82,11 @@ Choose **Analyze once** or **Start monitoring**. Confirm the destination and cap
 
 Processing modes:
 
-- **OCR only (default):** Set AI model to `llama3.2:1b` or another installed text model. Tesseract recognizes screen text at the original screenshot resolution, and the app sends only text (up to 4,000 characters) to Ollama. Unchanged OCR text is skipped during monitoring.
-- **Hybrid:** Set AI model to a text model and Hybrid vision model to an installed vision model (for example `gemma3:4b` on local Ollama). Screens with fewer than 20 recognized letters/digits fall back to the vision model. This heuristic cannot reliably identify diagrams that also contain text; use Vision only for those.
+- **OCR only (default):** Set AI model to `llama3.2:1b` or another installed text model. Tesseract recognizes screen text at the original screenshot resolution, and the app sends only text (up to 4,000 characters) to Ollama. Unchanged normalized OCR text is skipped during monitoring; a changed text value must be observed twice before an automatic request. Exact unchanged screenshots reuse the OCR result.
+- **Hybrid:** Set AI model to a text model and Hybrid vision model to an installed vision model (for example `gemma3:4b` on local Ollama). Confirmed text changes use the text model unless fewer than 20 letters/digits are recognized. A substantial, confirmed pixel change with unchanged or absent text uses the vision fallback.
 - **Vision only:** Select a vision-capable model in AI model. Local/remote Ollama's model capabilities are checked via `/api/show` before an image is submitted, when available.
+
+**Pixel change (%)** is saved and defaults to 2.0% (available in Hybrid and Vision only). The app compares color samples at 192×108, counts samples with a channel difference of at least 24/255, and requires two similar changed observations. Changes are measured against the last analyzed frame, not the last sampled frame. Ordinary pointer motion, small hover effects and transient animation should not trigger a vision request; persistent changes to actual visible text can still trigger OCR. Analyze once bypasses change checks.
 
 On first OCR use, the app downloads the public English `eng.traineddata` from Tesseract's tessdata_fast repository to `%LOCALAPPDATA%/PCSoundCapture/tessdata/`. Internet access is required for that first-time download, not subsequent local OCR. NuGet restores the Tesseract 5.2.0 wrapper and its native binaries; Windows may require the Microsoft Visual C++ 2015–2022 x64 redistributable. No separate OCR server is required. OCR currently recognizes English. Screenshots and recognized text are not saved by the screen assistant. Settings are persisted in the existing configuration file.
 
