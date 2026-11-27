@@ -7,7 +7,7 @@ using System.Text.Json;
 
 namespace PCSoundCapture;
 
-// Screen input is independent of audio. Nothing is written to disk.
+// Screen input is independent of audio. Only preferences are persisted.
 internal sealed class ScreenAssistantForm : Form
 {
     private readonly ComboBox _monitor = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
@@ -33,16 +33,26 @@ internal sealed class ScreenAssistantForm : Form
     private string _cloudModel;
     private string _localModel;
     private bool _closed;
+    private readonly AppSettings? _settings;
 
-    public ScreenAssistantForm(Form main, Form overlay, string endpoint, string localModel, string cloudModel)
+    public ScreenAssistantForm(Form main, Form overlay, string endpoint, string localModel, string cloudModel, AppSettings? settings = null)
     {
-        _main = main; _overlay = overlay;
-        _localModel = localModel; _cloudModel = cloudModel;
-        _endpoint.Text = endpoint; _model.Text = localModel;
+        _main = main; _overlay = overlay; _settings = settings;
+        _localModel = settings?.ScreenLocalModel ?? localModel;
+        _cloudModel = settings?.ScreenCloudModel ?? cloudModel;
+        _endpoint.Text = settings?.ScreenEndpoint ?? endpoint;
+        _cloud.Checked = settings?.ScreenUseCloud ?? false;
+        _model.Text = _cloud.Checked ? _cloudModel : _localModel;
+        _endpoint.Enabled = !_cloud.Checked;
+        _prompt.Text = settings?.ScreenPrompt ?? _prompt.Text;
         Text = "Screen assistant — stopped";
         Size = new Size(650, 420); TopMost = true;
         foreach (var screen in Screen.AllScreens) _monitor.Items.Add(screen.DeviceName);
-        if (_monitor.Items.Count > 0) _monitor.SelectedIndex = 0;
+        if (_monitor.Items.Count > 0)
+        {
+            int saved = settings?.ScreenMonitor is string monitor ? _monitor.Items.IndexOf(monitor) : -1;
+            _monitor.SelectedIndex = saved >= 0 ? saved : 0;
+        }
         var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 100, AutoScroll = true };
         top.Controls.AddRange([new Label { Text = "Monitor", AutoSize = true }, _monitor,
             _cloud, new Label { Text = "Vision model", AutoSize = true }, _model,
@@ -55,6 +65,10 @@ internal sealed class ScreenAssistantForm : Form
             else { _cloudModel = _model.Text; _model.Text = _localModel; }
             _endpoint.Enabled = !_cloud.Checked;
         };
+        var save = new Button { Text = "Save settings", AutoSize = true };
+        top.Controls.Add(save);
+        save.Click += (_, _) => { if (SaveSettings()) _status.Text = "Settings saved"; };
+        FormClosing += (_, _) => SaveSettings();
         _start.Click += async (_, _) =>
         {
             if (!BeginSession()) return;
@@ -67,6 +81,21 @@ internal sealed class ScreenAssistantForm : Form
         FormClosed += (_, _) => { _closed = true; StopSession(); _timer.Dispose(); _http.Dispose(); };
     }
 
+    private bool SaveSettings()
+    {
+        if (_settings == null) return false;
+        if (_cloud.Checked) _cloudModel = _model.Text.Trim();
+        else _localModel = _model.Text.Trim();
+        _settings.ScreenUseCloud = _cloud.Checked;
+        _settings.ScreenMonitor = _monitor.SelectedItem as string;
+        _settings.ScreenLocalModel = _localModel;
+        _settings.ScreenCloudModel = _cloudModel;
+        _settings.ScreenEndpoint = _endpoint.Text.Trim();
+        _settings.ScreenPrompt = _prompt.Text;
+        try { _settings.Save(); return true; }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Unable to save screen settings"); return false; }
+    }
+
     private bool BeginSession()
     {
         if (_session != null || _busy || _monitor.SelectedItem == null || string.IsNullOrWhiteSpace(_model.Text)) return false;
@@ -74,6 +103,7 @@ internal sealed class ScreenAssistantForm : Form
         if (MessageBox.Show(this, "Visible screen content will be sent to " + destination +
             ". Close sensitive content and use only where authorized. Continue?", "Screen capture consent",
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return false;
+        SaveSettings();
         _session = new(); _previous = null; _candidate = null; _stable = 0; _pendingFrames = 0;
         _start.Enabled = _once.Enabled = _monitor.Enabled = _cloud.Enabled = _model.Enabled = _endpoint.Enabled = _prompt.Enabled = false;
         _stop.Enabled = true; _status.Text = "Monitoring"; Text = "Screen assistant — monitoring";
