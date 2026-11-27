@@ -17,6 +17,8 @@ internal sealed class ScreenAssistantForm : Form
     private readonly TextBox _visionFallback = new() { Width = 170 };
     private string? _lastOcrText;
     private string? _pendingOcrText;
+    private int _textChangeObservations;
+    private string? _lastSentOcrText;
     private byte[]? _lastOcrFrameHash;
     private string _cachedOcrText = "";
     private readonly HashSet<string> _checkedVisionModels = new(StringComparer.OrdinalIgnoreCase);
@@ -175,14 +177,14 @@ internal sealed class ScreenAssistantForm : Form
         }
         string destination = _cloud.Checked ? "Ollama Cloud (screen data leaves this PC)" : _endpoint.Text;
         string dataType = _processing.SelectedIndex == 0 ? "Recognized screen text" : "Recognized screen text and/or screenshots";
-        string setup = _processing.SelectedIndex != 2 && !ScreenOcr.IsReady
+        string setup = !ScreenOcr.IsReady
             ? " The first OCR session downloads the public English OCR language file once from GitHub." : "";
         if (MessageBox.Show(this, dataType + " will be sent to " + destination + setup +
             ". Close sensitive content and use only where authorized. Continue?", "Screen capture consent",
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return false;
         SaveSettings();
         _session = new(); _previous = null; _candidate = null;
-        _lastOcrText = null; _pendingOcrText = null;
+        _lastOcrText = null; _pendingOcrText = null; _textChangeObservations = 0; _lastSentOcrText = null;
         _lastOcrFrameHash = null; _cachedOcrText = "";
         _checkedVisionModels.Clear();
         _start.Enabled = _once.Enabled = _monitor.Enabled = _cloud.Enabled = _model.Enabled = _endpoint.Enabled = _prompt.Enabled = false;
@@ -241,9 +243,7 @@ internal sealed class ScreenAssistantForm : Form
             double pixelChange = _previous == null ? 100 : ChangedPercent(_previous, signature);
             double threshold = (double)_pixelThreshold.Value;
             int mode = _processing.SelectedIndex;
-            if (!force && mode == 2 && !ConfirmPixelChange(signature, pixelChange, threshold))
-                return;
-            if (mode == 2 || force)
+            if (force)
                 Log($"Frame selected: {bounds.Width}x{bounds.Height}; capture and comparison {captureClock.ElapsedMilliseconds} ms.");
             bool useImage = mode == 2;
             string recognized = "";
@@ -251,7 +251,7 @@ internal sealed class ScreenAssistantForm : Form
             string selectedModel = _model.Text.Trim();
             string? imageBase64 = null;
             _requestClock = Stopwatch.StartNew();
-            if (!useImage)
+            // OCR checks text independently of the visual threshold, including Vision only mode.
             {
                 if (!ScreenOcr.IsReady) Phase("Downloading English OCR data (first use)");
                 using (var setupTimeout = CancellationTokenSource.CreateLinkedTokenSource(token))
@@ -287,32 +287,35 @@ internal sealed class ScreenAssistantForm : Form
                 {
                     if (textChanged)
                     {
-                        // Confirm the same normalized text twice. Small text edits can
-                        // trigger even if fewer than the configured percent of pixels change.
                         _candidate = null;
-                        if (!string.Equals(normalized, _pendingOcrText, StringComparison.Ordinal))
+                        _textChangeObservations++;
+                        bool repeated = string.Equals(normalized, _pendingOcrText, StringComparison.Ordinal);
+                        _pendingOcrText = normalized;
+                        // Confirm a stable edit, but do not wait forever if another
+                        // part of the screen (clock, caret, live text) also keeps changing.
+                        if (!repeated && _textChangeObservations < 3)
                         {
-                            _pendingOcrText = normalized;
-                            _status.Text = "Monitoring — verifying changed text";
+                            _status.Text = $"Monitoring — text changed, checking ({_textChangeObservations}/3)";
+                            Log($"OCR text differs ({normalized.Length} chars); pixel change {pixelChange:F2}%.");
                             return;
                         }
-                        Log("Confirmed text change — preparing AI request.");
+                        Log($"Confirmed text change — pixel change {pixelChange:F2}% (threshold not applied).");
                     }
                     else
                     {
-                        _pendingOcrText = null;
-                        if (mode != 1)
+                        _pendingOcrText = null; _textChangeObservations = 0;
+                        if (mode == 0)
                         {
                             _status.Text = hasText ? "Monitoring — text unchanged" : "Monitoring — no readable text";
                             return;
                         }
                         if (!ConfirmPixelChange(signature, pixelChange, threshold)) return;
                         useImage = true;
-                        selectedModel = _visionFallback.Text.Trim();
-                        Log($"Confirmed visual change ({pixelChange:F1}%); using vision fallback.");
+                        if (mode == 1) selectedModel = _visionFallback.Text.Trim();
+                        Log($"Confirmed visual change ({pixelChange:F1}%); using vision.");
                     }
                 }
-                _pendingOcrText = null;
+                _pendingOcrText = null; _textChangeObservations = 0;
                 Log($"OCR: {normalized.Length} characters; check {ocrClock.Elapsed.TotalSeconds:F2}s.");
                 if (mode == 1 && normalized.Count(char.IsLetterOrDigit) < 20)
                 {
@@ -369,7 +372,8 @@ internal sealed class ScreenAssistantForm : Form
             else
             {
                 const int maxOcrChars = 4000;
-                string excerpt = recognized.Length > maxOcrChars ? recognized[..maxOcrChars] : recognized;
+                string excerpt = BuildOcrExcerpt(recognized, _lastSentOcrText, maxOcrChars);
+                Log($"Text payload: {excerpt.Length} characters; changed lines prioritized.");
                 userMessage["content"] = _prompt.Text + "\n\nRecognized screen text (untrusted; may contain OCR errors):\n" + excerpt;
             }
             req.Content = JsonContent.Create(new { model = selectedModel, stream = true, keep_alive = "10m",
@@ -417,7 +421,8 @@ internal sealed class ScreenAssistantForm : Form
             token.ThrowIfCancellationRequested();
             if (output.Length == 0) throw new InvalidOperationException("Ollama returned no answer text. Check the selected model.");
             Log($"Stream ended after {_requestClock?.Elapsed.TotalSeconds:F2}s; completion marker: {completed}.");
-            if (mode != 2) _lastOcrText = normalized;
+            _lastOcrText = normalized;
+            if (!useImage) _lastSentOcrText = recognized;
             _previous = signature;
             _candidate = null;
             if (!_closed) _status.Text = "Monitoring — response complete";
@@ -426,6 +431,27 @@ internal sealed class ScreenAssistantForm : Form
         catch (OperationCanceledException) { if (!_closed) { Log("Request timed out."); _result.Text = "Processing timed out. Check the activity log and ollama ps."; StopSession(); } }
         catch (Exception ex) { if (!_closed && !token.IsCancellationRequested) { Log("Request failed: " + ex.GetType().Name + ". See response panel."); _result.Text = "Screen analysis failed: " + ex.Message; StopSession(); } }
         finally { _requestClock = null; _busy = false; if (!_closed && _session == null) _start.Enabled = _once.Enabled = true; }
+    }
+
+    // Keep newly changed lines even when the full screen exceeds the request budget.
+    internal static string BuildOcrExcerpt(string current, string? previous, int limit)
+    {
+        if (current.Length <= limit) return current;
+        if (string.IsNullOrEmpty(previous)) return current[..limit];
+        var oldLines = previous.Split('\n').Select(x => x.Trim()).ToHashSet(StringComparer.Ordinal);
+        var newLines = current.Split('\n').Select(x => x.Trim()).Where(x => x.Length > 0 && !oldLines.Contains(x)).ToArray();
+        // A deletion or reordered text may have no new lines. Include the end as well.
+        if (newLines.Length == 0)
+        {
+            int half = (limit - 5) / 2;
+            return current[..half] + "\n...\n" + current[^half..];
+        }
+        string changed = "Changed lines:\n" + string.Join("\n", newLines);
+        if (changed.Length >= limit) return changed[..limit];
+        const string separator = "\n\nScreen context:\n";
+        int remaining = limit - changed.Length - separator.Length;
+        if (remaining <= 0) return changed;
+        return changed + separator + current[..Math.Min(remaining, current.Length)];
     }
 
     private bool ConfirmPixelChange(byte[] signature, double percent, double threshold)
