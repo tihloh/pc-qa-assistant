@@ -1,4 +1,5 @@
 using System.Drawing.Imaging;
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
@@ -18,6 +19,10 @@ internal sealed class ScreenAssistantForm : Form
     private readonly NumericUpDown _maxTokens = new() { Minimum = 16, Maximum = 1024, Value = 80, Width = 65 };
     private readonly NumericUpDown _imageSize = new() { Minimum = 512, Maximum = 4096, Increment = 128, Value = 1024, Width = 75 };
     private readonly TextBox _result = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
+    private readonly TextBox _activity = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Font = new Font("Consolas", 9) };
+    private readonly System.Windows.Forms.Timer _activityTimer = new() { Interval = 1000 };
+    private Stopwatch? _requestClock;
+    private string _phase = "";
     private readonly Label _status = new() { Text = "Stopped", AutoSize = true };
     private readonly Button _start = new() { Text = "Start monitoring", AutoSize = true };
     private readonly Button _stop = new() { Text = "Stop", AutoSize = true, Enabled = false };
@@ -50,7 +55,7 @@ internal sealed class ScreenAssistantForm : Form
         _maxTokens.Value = Math.Clamp(settings?.ScreenMaxTokens ?? 80, 16, 1024);
         _imageSize.Value = Math.Clamp(settings?.ScreenImageSize ?? 1024, 512, 4096);
         Text = "Screen assistant — stopped";
-        Size = new Size(650, 420); TopMost = true;
+        Size = new Size(780, 650); MinimumSize = new Size(650, 500); TopMost = true;
         foreach (var screen in Screen.AllScreens) _monitor.Items.Add(screen.DeviceName);
         if (_monitor.Items.Count > 0)
         {
@@ -64,7 +69,24 @@ internal sealed class ScreenAssistantForm : Form
             _start, _stop, _once, _status,
             new Label { Text = "Max tokens", AutoSize = true }, _maxTokens,
             new Label { Text = "Max image edge (px)", AutoSize = true }, _imageSize]);
-        Controls.Add(_result); Controls.Add(_prompt); Controls.Add(top);
+        var split = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+        split.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+        split.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+        var answerGroup = new GroupBox { Text = "AI response", Dock = DockStyle.Fill };
+        answerGroup.Controls.Add(_result);
+        var logGroup = new GroupBox { Text = "Live activity (not saved)", Dock = DockStyle.Fill };
+        var clearLog = new Button { Text = "Clear log", Dock = DockStyle.Bottom, Height = 28 };
+        clearLog.Click += (_, _) => _activity.Clear();
+        logGroup.Controls.Add(_activity); logGroup.Controls.Add(clearLog);
+        split.Controls.Add(answerGroup, 0, 0); split.Controls.Add(logGroup, 0, 1);
+        Controls.Add(split); Controls.Add(_prompt); Controls.Add(top);
+        _activityTimer.Tick += (_, _) =>
+        {
+            if (_requestClock != null)
+                _status.Text = $"{_phase} — {_requestClock.Elapsed.TotalSeconds:F0}s";
+        };
+        _activityTimer.Start();
+        Log("Ready. Start monitoring or analyze once.");
         _cloud.CheckedChanged += (_, _) =>
         {
             if (_cloud.Checked) { _localModel = _model.Text; _model.Text = _cloudModel; }
@@ -84,7 +106,22 @@ internal sealed class ScreenAssistantForm : Form
         _stop.Click += (_, _) => StopSession();
         _once.Click += async (_, _) => { if (BeginSession()) { await CaptureAsync(true); StopSession(); } };
         _timer.Tick += async (_, _) => await CaptureAsync(false);
-        FormClosed += (_, _) => { _closed = true; StopSession(); _timer.Dispose(); _http.Dispose(); };
+        FormClosed += (_, _) => { _closed = true; StopSession(); _timer.Dispose(); _activityTimer.Stop(); _activityTimer.Dispose(); _http.Dispose(); };
+    }
+
+    private void Log(string message)
+    {
+        if (_closed) return;
+        if (_activity.TextLength > 30000) _activity.Text = _activity.Text[^15000..];
+        _activity.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+    }
+
+    private void Phase(string message)
+    {
+        if (_closed) return;
+        _phase = message;
+        _status.Text = message;
+        Log(message);
     }
 
     private bool SaveSettings()
@@ -115,6 +152,7 @@ internal sealed class ScreenAssistantForm : Form
         _session = new(); _previous = null; _candidate = null; _stable = 0; _pendingFrames = 0;
         _start.Enabled = _once.Enabled = _monitor.Enabled = _cloud.Enabled = _model.Enabled = _endpoint.Enabled = _prompt.Enabled = false;
         _maxTokens.Enabled = _imageSize.Enabled = false;
+        Log($"Session started: {(_cloud.Checked ? "cloud" : "local/remote")}, model {_model.Text}, {_maxTokens.Value} max tokens.");
         _stop.Enabled = true; _status.Text = "Monitoring"; Text = "Screen assistant — monitoring";
         return true;
     }
@@ -128,6 +166,8 @@ internal sealed class ScreenAssistantForm : Form
         _monitor.Enabled = _cloud.Enabled = _model.Enabled = _prompt.Enabled = true;
         _endpoint.Enabled = !_cloud.Checked; _stop.Enabled = false;
         _maxTokens.Enabled = _imageSize.Enabled = true;
+        _requestClock = null;
+        if (session != null) Log("Session stopped; outstanding request cancelled.");
         _status.Text = "Stopped"; Text = "Screen assistant — stopped";
     }
 
@@ -136,6 +176,7 @@ internal sealed class ScreenAssistantForm : Form
         if (_busy || _session == null) return;
         _busy = true;
         var token = _session.Token;
+        var captureClock = Stopwatch.StartNew();
         try
         {
             var screen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == (string?)_monitor.SelectedItem)
@@ -180,11 +221,14 @@ internal sealed class ScreenAssistantForm : Form
                     return;
                 }
             }
+            Log($"Frame selected: {bounds.Width}x{bounds.Height}; capture and comparison {captureClock.ElapsedMilliseconds} ms.");
             using var data = new MemoryStream();
             double scale = Math.Min(1.0, (double)_imageSize.Value / Math.Max(frame.Width, frame.Height));
             using var resized = new Bitmap(frame, Math.Max(1, (int)(frame.Width * scale)), Math.Max(1, (int)(frame.Height * scale)));
             resized.Save(data, ImageFormat.Png);
-            _status.Text = "Sending screenshot to " + _model.Text.Trim() + "…";
+            Log($"Prepared PNG: {resized.Width}x{resized.Height}, {data.Length / 1024.0:F1} KiB.");
+            _requestClock = Stopwatch.StartNew();
+            Phase("Submitting Ollama request");
             string endpoint = _cloud.Checked ? "https://ollama.com/api/chat" : _endpoint.Text.TrimEnd('/') + "/api/chat";
             if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) || (uri.Scheme != "http" && uri.Scheme != "https"))
                 throw new InvalidOperationException("Invalid Ollama endpoint.");
@@ -207,9 +251,11 @@ internal sealed class ScreenAssistantForm : Form
                 var body = await response.Content.ReadAsStringAsync(deadline.Token);
                 throw new InvalidOperationException($"Ollama HTTP {(int)response.StatusCode}: {body}");
             }
-            _status.Text = "Ollama connected — generating response…";
+            Phase($"HTTP {(int)response.StatusCode}; waiting for answer text");
             using var reader = new StreamReader(await response.Content.ReadAsStreamAsync(deadline.Token));
             var output = new StringBuilder();
+            bool firstText = true;
+            bool completed = false;
             while (await reader.ReadLineAsync(deadline.Token) is string line)
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
@@ -217,22 +263,32 @@ internal sealed class ScreenAssistantForm : Form
                 if (json.RootElement.TryGetProperty("error", out var error)) throw new InvalidOperationException(error.GetString());
                 if (json.RootElement.TryGetProperty("message", out var message) && message.TryGetProperty("content", out var content))
                     output.Append(content.GetString());
+                if (json.RootElement.TryGetProperty("done", out var done) && done.ValueKind == JsonValueKind.True)
+                {
+                    completed = true;
+                    foreach (var field in new[] { "load_duration", "prompt_eval_duration", "eval_duration", "total_duration" })
+                        if (json.RootElement.TryGetProperty(field, out var duration) && duration.TryGetInt64(out long ns))
+                            Log($"{field}: {ns / 1e9:F2} s");
+                    if (json.RootElement.TryGetProperty("eval_count", out var count) && count.TryGetInt64(out long tokens))
+                        Log($"Generated tokens: {tokens}");
+                }
                 if (!_closed && !token.IsCancellationRequested && output.Length > 0)
                 {
-                    _status.Text = "Receiving response…";
+                    if (firstText) { firstText = false; Phase($"First answer text after {_requestClock?.Elapsed.TotalSeconds:F2}s; streaming"); }
                     _result.Text = output.ToString();
                 }
             }
             token.ThrowIfCancellationRequested();
             if (output.Length == 0) throw new InvalidOperationException("Ollama returned no answer text. Check the selected vision model.");
+            Log($"Stream ended after {_requestClock?.Elapsed.TotalSeconds:F2}s; completion marker: {completed}.");
             _previous = signature;
             _candidate = null; _stable = 0; _pendingFrames = 0;
             if (!_closed) _status.Text = "Monitoring — response complete";
         }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-        catch (OperationCanceledException) { if (!_closed) { _result.Text = "Ollama timed out. Check ollama ps and try a smaller vision model."; StopSession(); } }
-        catch (Exception ex) { if (!_closed && !token.IsCancellationRequested) { _result.Text = "Screen analysis failed: " + ex.Message; StopSession(); } }
-        finally { _busy = false; if (!_closed && _session == null) _start.Enabled = _once.Enabled = true; }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { Log("Request cancelled."); }
+        catch (OperationCanceledException) { if (!_closed) { Log("Request timed out."); _result.Text = "Ollama timed out. Check ollama ps and try a smaller vision model."; StopSession(); } }
+        catch (Exception ex) { if (!_closed && !token.IsCancellationRequested) { Log("Request failed: " + ex.GetType().Name + ". See response panel."); _result.Text = "Screen analysis failed: " + ex.Message; StopSession(); } }
+        finally { _requestClock = null; _busy = false; if (!_closed && _session == null) _start.Enabled = _once.Enabled = true; }
     }
 
     private static double Difference(byte[] a, byte[] b)
