@@ -23,6 +23,13 @@ internal sealed class AppSettings
     public string AiModel { get; set; } = "llama3.2:3b";
     public string AiEndpoint { get; set; } = "http://127.0.0.1:11434";
 
+    public bool ScreenUseCloud { get; set; }
+    public string? ScreenMonitor { get; set; }
+    public string? ScreenLocalModel { get; set; }
+    public string? ScreenCloudModel { get; set; }
+    public string? ScreenEndpoint { get; set; }
+    public string? ScreenPrompt { get; set; }
+
     private static string SettingsFile => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "PCSoundCapture", "settings.json");
